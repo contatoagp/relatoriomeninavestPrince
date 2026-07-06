@@ -1,0 +1,31 @@
+[2026-07-06 15:26:15] Janela de coleta: 2026-04-02 a 2026-07-05
+[2026-07-06 15:32:37] Meta OK: 95 dias, 1546 linhas de campanha, 4069 linhas de anúncio
+[2026-07-06 15:33:09] Criativos: assets de 20 anúncios baixados
+[2026-07-06 15:33:09] PENDENTE Google Ads: defina WINDSOR_API_KEY e conecte a conta em onboard.windsor.ai
+[2026-07-06 15:33:09] PENDENTE GA4: defina WINDSOR_API_KEY e conecte a propriedade em onboard.windsor.ai
+[2026-07-06 15:33:09] PENDENTE Bagy: defina BAGY_API_TOKEN (painel Bagy > Integrações > API)
+[2026-07-06 15:33:09] data.json gravado (1464 KB)
+[2026-07-06 15:33:09] Fallback embutido no index.html
+[2026-07-06 15:33:09] SUCESSO
+[2026-07-06 16:49:08] Janela de coleta: 2026-04-02 a 2026-07-05
+[2026-07-06 16:54:32] Meta OK: 95 dias, 1546 linhas de campanha, 4069 linhas de anúncio
+[2026-07-06 16:55:17] Criativos: assets de 20 anúncios baixados
+[2026-07-06 16:55:22] Google Ads OK (Windsor): 85 dias, 508 linhas de campanha
+[2026-07-06 16:55:37] ERRO GA4: Windsor googleanalytics4: Falha em https://connectors.windsor.ai/googleanalytics4: HTTP Error 400: BAD REQUEST {"error":"No googleanalytics4 account for user contatoagenciaprincecombr was found, add your accounts at https://onboard.windsor.ai?datasource=googleanalytics4 "}
+
+[2026-07-06 16:55:37] PENDENTE Bagy: defina BAGY_API_TOKEN (painel Bagy > Integrações > API)
+[2026-07-06 16:55:37] data.json gravado (1541 KB)
+[2026-07-06 16:55:37] Fallback embutido no index.html
+[2026-07-06 16:55:37] SUCESSO
+[2026-07-06 16:57:37] Janela de coleta: 2026-04-02 a 2026-07-05
+[2026-07-06 17:20:23] Meta OK: 95 dias, 1546 linhas de campanha, 4069 linhas de anúncio
+[2026-07-06 17:20:50] Criativos: assets de 20 anúncios baixados
+[2026-07-06 17:20:52] Google Ads OK (Windsor): 85 dias, 508 linhas de campanha
+[2026-07-06 17:21:05] GA4 OK (Windsor): 35145 linhas de página
+[2026-07-06 17:21:05] PENDENTE Bagy: defina BAGY_API_TOKEN (painel Bagy > Integrações > API)
+[2026-07-06 17:21:05] data.json gravado (4771 KB)
+[2026-07-06 17:21:05] Fallback embutido no index.html
+[2026-07-06 17:21:05] SUCESSO
+[2026-07-06 17:23:28] GA4: 35145 linhas reduzidas a 11400 (top 120 páginas/dia)
+[2026-07-06 17:23:28] GA4: 3600 linhas reduzidas a 1200 (top 40 páginas/dia)
+[2026-07-06 17:23:28] Fallback embutido no index.html
