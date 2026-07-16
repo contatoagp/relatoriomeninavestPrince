@@ -5,8 +5,9 @@ Coletor diário do relatório vivo — Agência Prince · Menina Vest.
 
 Busca métricas DIÁRIAS e grava data.json ao lado do index.html:
   - Meta Ads: direto na Marketing API (token de System User, escopo ads_read).
-  - Google Ads e GA4: via Windsor.ai (exige WINDSOR_API_KEY e contas conectadas
-    em onboard.windsor.ai). Enquanto não houver chave, a fonte fica "pendente".
+  - Google Ads: direto na Google Ads API (GAQL, REST v21) — tenta via MCC da
+    Prince (login-customer-id) e cai pra acesso direto do usuário OAuth.
+  - GA4: Analytics Data API nativa (grátis), mesmo OAuth de usuário.
   - Bagy: aguardando BAGY_API_TOKEN — integração será ativada quando o token existir.
 
 Também re-embute um fallback compacto (últimos 30 dias, sem imagens) dentro do
@@ -21,13 +22,15 @@ import base64
 import json
 import os
 import re
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
 RAIZ = os.path.dirname(os.path.abspath(__file__))
 JANELA_DIAS = 95            # cobre mês anterior completo + intervalos customizados
-FATIA_DIAS = 32             # tamanho de cada chamada de insights (evita respostas gigantes)
+FATIA_DIAS = int(os.environ.get("FATIA_DIAS", "32"))  # tamanho de cada chamada de insights (evita respostas gigantes)
 TOP_CRIATIVOS_ASSETS = 20   # anúncios cujo criativo (imagem + link) é baixado
 FALLBACK_DIAS = 30          # janela do fallback embutido no index.html
 FALLBACK_TOP_ADS = 10       # anúncios mantidos no fallback
@@ -35,7 +38,7 @@ GA4_TOP_PAGINAS_DIA = 120   # páginas mantidas por dia (controla o tamanho do d
 FALLBACK_TOP_PAGINAS = 40   # páginas por dia no fallback embutido
 TZ_SP = timezone(timedelta(hours=-3))
 
-CLIENTE = "Menina Vest"
+CLIENTE = os.environ.get("CLIENTE_NOME", "Menina Vest")
 RESPONSAVEL = "Equipe Prince"
 
 LOG = []
@@ -57,9 +60,9 @@ def carrega_env():
                 os.environ.setdefault(k.strip(), v.strip())
 
 
-def http_json(url, tentativas=3):
+def http_json(url, tentativas=5):
     ultimo = None
-    for _ in range(tentativas):
+    for i in range(tentativas):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "PrinceColetor/1.0"})
             with urllib.request.urlopen(req, timeout=90) as r:
@@ -72,6 +75,9 @@ def http_json(url, tentativas=3):
                 except Exception:
                     pass
             ultimo = f"{e} {corpo}"
+            # backoff progressivo: erros transitórios do Meta se resolvem com espera
+            if i < tentativas - 1:
+                time.sleep(8 * (i + 1))
     raise RuntimeError(f"Falha em {url.split('?')[0]}: {ultimo}")
 
 
@@ -118,10 +124,13 @@ def resultado_meta(linha):
 
 
 def fatias(desde, ate):
+    # relido aqui (não no import) pra valer o FATIA_DIAS do .env do cliente —
+    # contas grandes (ex.: Lumi) precisam de 10 pra não estourar o erro Meta 1504044
+    passo = int(os.environ.get("FATIA_DIAS", str(FATIA_DIAS)))
     d1 = datetime.fromisoformat(desde).date()
     fim = datetime.fromisoformat(ate).date()
     while d1 <= fim:
-        d2 = min(d1 + timedelta(days=FATIA_DIAS - 1), fim)
+        d2 = min(d1 + timedelta(days=passo - 1), fim)
         yield d1.isoformat(), d2.isoformat()
         d1 = d2 + timedelta(days=1)
 
@@ -250,62 +259,89 @@ def coleta_assets_criativos(criativos):
 
 
 # ============================================================
-# GOOGLE ADS e GA4 (via Windsor.ai)
+# GOOGLE ADS (API nativa, GAQL) — via MCC da Prince ou acesso direto
 # ============================================================
 
-def windsor(conector, chave_env, conjuntos_de_campos, desde, ate, conta):
-    # uma conta Windsor (e portanto uma chave) por conector; WINDSOR_API_KEY é fallback comum
-    chave = os.environ.get(chave_env, "") or os.environ.get("WINDSOR_API_KEY", "")
-    if not chave:
-        return None
-    erro = None
-    for campos in conjuntos_de_campos:
-        # tenta restrito à conta; se o formato do id divergir do esperado pelo
-        # Windsor, repete sem select_accounts (a chave só enxerga a conta certa)
-        for com_conta in ([True, False] if conta else [False]):
+GOOGLE_ADS_API = "v21"   # v18 morreu (404); `pageSize` não existe mais no search
+
+
+def gaql_search(customer_id, consulta, tok, login=None):
+    """POST em googleAds:search com paginação. login=None => acesso direto."""
+    url = (f"https://googleads.googleapis.com/{GOOGLE_ADS_API}/"
+           f"customers/{customer_id}/googleAds:search")
+    cab = {"Authorization": f"Bearer {tok}",
+           "developer-token": os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"],
+           "Content-Type": "application/json"}
+    if login:
+        cab["login-customer-id"] = login
+    linhas, pagina = [], None
+    while True:
+        corpo = {"query": consulta}
+        if pagina:
+            corpo["pageToken"] = pagina
+        req = urllib.request.Request(url, data=json.dumps(corpo).encode(),
+                                     headers=cab, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                resp = json.load(r)
+        except urllib.error.HTTPError as e:
+            detalhe = ""
             try:
-                params = {
-                    "api_key": chave,
-                    "date_from": desde,
-                    "date_to": ate,
-                    "fields": ",".join(campos),
-                }
-                if com_conta:
-                    params["select_accounts"] = conta
-                url = f"https://connectors.windsor.ai/{conector}?" + urllib.parse.urlencode(params)
-                resp = http_json(url)
-                dados = resp.get("data") if isinstance(resp, dict) else resp
-                if isinstance(dados, list):
-                    if conta and not com_conta:
-                        log(f"AVISO {conector}: select_accounts={conta} não bateu; usando todas as contas da chave")
-                    return dados
-                erro = f"resposta inesperada: {str(resp)[:200]}"
-            except RuntimeError as e:
-                erro = str(e)
-    raise RuntimeError(f"Windsor {conector}: {erro}")
+                detalhe = e.read().decode(errors="replace")[:300]
+            except Exception:
+                pass
+            raise RuntimeError(f"HTTP {e.code} {detalhe}")
+        linhas.extend(resp.get("results", []))
+        pagina = resp.get("nextPageToken")
+        if not pagina:
+            return linhas
 
 
 def coleta_google(desde, ate):
-    conjuntos = [
-        ["date", "campaign", "clicks", "spend", "impressions", "conversions", "conversion_value"],
-        ["date", "campaign", "clicks", "spend", "impressions", "conversions", "totalconversionvalue"],
-    ]
-    linhas = windsor("google_ads", "WINDSOR_API_KEY_GOOGLE_ADS", conjuntos, desde, ate,
-                     os.environ.get("GOOGLE_ADS_CUSTOMER_ID", ""))
-    if linhas is None:
-        log("PENDENTE Google Ads: defina WINDSOR_API_KEY_GOOGLE_ADS e conecte a conta em onboard.windsor.ai")
+    """Google Ads pela Google Ads API (GAQL v21), sem intermediário.
+
+    A conta pode ser filha do MCC da Prince (precisa do header
+    login-customer-id) ou acesso direto do usuário OAuth (header proibido) —
+    tenta primeiro via MCC e cai pro modo direto."""
+    cid = os.environ.get("GOOGLE_ADS_CUSTOMER_ID", "").replace("-", "").strip()
+    dev = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN", "")
+    tok = google_access_token()
+    if not cid:
+        log("PENDENTE Google Ads: cliente sem GOOGLE_ADS_CUSTOMER_ID no .env")
         return None, []
+    if not (dev and tok):
+        log("PENDENTE Google Ads: faltam GOOGLE_ADS_DEVELOPER_TOKEN e/ou OAuth Google no .env")
+        return None, []
+    consulta = (
+        "SELECT segments.date, campaign.name, metrics.cost_micros, metrics.clicks, "
+        "metrics.impressions, metrics.conversions, metrics.conversions_value "
+        f"FROM campaign WHERE segments.date BETWEEN '{desde}' AND '{ate}'"
+    )
+    login = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "").replace("-", "").strip() or None
+    linhas, erros = None, []
+    for l in ([login, None] if login else [None]):
+        try:
+            linhas = gaql_search(cid, consulta, tok, l)
+            break
+        except RuntimeError as e:
+            erros.append(f"{'via MCC' if l else 'direto'}: {e}")
+    if linhas is None:
+        raise RuntimeError(" | ".join(erros))
+
     diario = {}
     campanhas = []
-    for l in linhas:
-        d = str(l.get("date", ""))[:10]
-        custo = float(l.get("spend") or 0)
-        cliques = int(float(l.get("clicks") or 0))
-        impress = int(float(l.get("impressions") or 0))
-        conv = float(l.get("conversions") or 0)
-        valor = float(l.get("conversion_value") or l.get("totalconversionvalue") or 0)
+    for x in linhas:
+        m = x.get("metrics", {})
+        d = x.get("segments", {}).get("date", "")
+        custo = int(float(m.get("costMicros") or 0)) / 1e6
+        cliques = int(float(m.get("clicks") or 0))
+        impress = int(float(m.get("impressions") or 0))
+        conv = float(m.get("conversions") or 0)
+        valor = float(m.get("conversionsValue") or 0)
+        if not (custo or cliques or impress or conv):
+            continue  # dia sem movimento nessa campanha: não polui o data.json
         campanhas.append({
-            "date": d, "nome": l.get("campaign", "—"), "custo": r2(custo),
+            "date": d, "nome": x.get("campaign", {}).get("name", "—"), "custo": r2(custo),
             "cliques": cliques, "conversoes": r2(conv), "valorConversao": r2(valor),
             "impressoes": impress,
         })
@@ -316,31 +352,77 @@ def coleta_google(desde, ate):
         agg["impressoes"] += impress
         agg["conversoes"] = r2(agg["conversoes"] + conv)
         agg["valorConversao"] = r2(agg["valorConversao"] + valor)
-    log(f"Google Ads OK (Windsor): {len(diario)} dias, {len(campanhas)} linhas de campanha")
+    log(f"Google Ads OK (API nativa): {len(diario)} dias com movimento, {len(campanhas)} linhas de campanha")
     return diario, campanhas
 
 
-def coleta_ga4(desde, ate):
-    # "conversoes" = transactions (compras): o campo conversions bruto desta
-    # propriedade conta todos os key events e supera as sessões (taxa > 100%)
-    conjuntos = [
-        ["date", "landing_page", "sessions", "transactions"],
-    ]
-    linhas = windsor("googleanalytics4", "WINDSOR_API_KEY_GA4", conjuntos, desde, ate,
-                     os.environ.get("GA4_PROPERTY_ID", ""))
-    if linhas is None:
-        log("PENDENTE GA4: defina WINDSOR_API_KEY_GA4 e conecte a propriedade em onboard.windsor.ai")
+def google_access_token():
+    """Access token de curta duração a partir do refresh token OAuth (Ads+GA4)."""
+    cid = os.environ.get("GOOGLE_ADS_CLIENT_ID", "")
+    csec = os.environ.get("GOOGLE_ADS_CLIENT_SECRET", "")
+    rtok = os.environ.get("GOOGLE_ADS_REFRESH_TOKEN", "")
+    if not (cid and csec and rtok):
         return None
+    body = urllib.parse.urlencode({
+        "client_id": cid, "client_secret": csec,
+        "refresh_token": rtok, "grant_type": "refresh_token",
+    }).encode()
+    req = urllib.request.Request("https://oauth2.googleapis.com/token", data=body,
+                                 headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=90) as r:
+        return json.load(r).get("access_token")
+
+
+def _ga4_dia(s):
+    return f"{s[0:4]}-{s[4:6]}-{s[6:8]}" if len(s) == 8 and s.isdigit() else str(s)[:10]
+
+
+def coleta_ga4(desde, ate):
+    """GA4 pela Analytics Data API (nativa, grátis). Retorna (paginas, diario):
+      - diario: TOTAIS OFICIAIS da propriedade por dia (sessions/transactions/
+        purchaseRevenue) — batem 1:1 com o painel do GA4; alimentam daily[].ga4
+      - paginas: quebra por landing page, top N/dia — SÓ pra tabela de páginas
+        (parcial de propósito; nunca usar pra somar totais)"""
+    prop = os.environ.get("GA4_PROPERTY_ID", "")
+    tok = google_access_token()
+    if not (prop and tok):
+        log("PENDENTE GA4: defina GA4_PROPERTY_ID e o OAuth Google (CLIENT_ID/SECRET/REFRESH_TOKEN)")
+        return None, None
+
+    def run_report(dimensoes, metricas):
+        url = f"https://analyticsdata.googleapis.com/v1beta/properties/{prop}:runReport"
+        corpo = json.dumps({
+            "dateRanges": [{"startDate": desde, "endDate": ate}],
+            "dimensions": [{"name": d} for d in dimensoes],
+            "metrics": [{"name": m} for m in metricas],
+            "limit": "100000",
+        }).encode()
+        req = urllib.request.Request(url, data=corpo, method="POST",
+                                     headers={"Authorization": f"Bearer {tok}",
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=90) as r:
+            return json.load(r).get("rows", [])
+
+    diario = {}
+    for row in run_report(["date"], ["sessions", "transactions", "purchaseRevenue"]):
+        d = _ga4_dia(row["dimensionValues"][0]["value"])
+        mv = [x["value"] for x in row["metricValues"]]
+        diario[d] = {"sessoes": int(float(mv[0] or 0)),
+                     "transacoes": int(float(mv[1] or 0)),
+                     "receita": r2(float(mv[2] or 0))}
+
     paginas = []
-    for l in linhas:
+    for row in run_report(["date", "landingPage"], ["sessions", "transactions"]):
+        dv = [x["value"] for x in row["dimensionValues"]]
+        mv = [x["value"] for x in row["metricValues"]]
         paginas.append({
-            "date": str(l.get("date", ""))[:10],
-            "pagina": l.get("landing_page") or "—",
-            "sessoes": int(float(l.get("sessions") or 0)),
-            "conversoes": int(float(l.get("transactions") or 0)),
+            "date": _ga4_dia(dv[0]),
+            "pagina": dv[1] or "—",
+            "sessoes": int(float(mv[0] or 0)),
+            "conversoes": int(float(mv[1] or 0)),
         })
-    log(f"GA4 OK (Windsor): {len(paginas)} linhas de página")
-    return enxuga_ga4(paginas, GA4_TOP_PAGINAS_DIA)
+    log(f"GA4 OK (API nativa): {len(diario)} dias de totais oficiais, {len(paginas)} linhas de página")
+    return enxuga_ga4(paginas, GA4_TOP_PAGINAS_DIA), diario
 
 
 def enxuga_ga4(paginas, top_por_dia):
@@ -384,24 +466,28 @@ def monta_dados():
     assets = coleta_assets_criativos(criativos)
 
     google_diario, google_campanhas = None, []
+    motivo_google = ("Cliente sem conta Google Ads vinculada"
+                     if not os.environ.get("GOOGLE_ADS_CUSTOMER_ID") else None)
     try:
         google_diario, google_campanhas = coleta_google(desde, ate)
     except Exception as e:
         log(f"ERRO Google Ads: {e}")
+        motivo_google = "Falha na coleta Google Ads — ver coleta.log"
 
-    ga4_paginas = None
+    ga4_paginas, ga4_diario = None, None
     try:
-        ga4_paginas = coleta_ga4(desde, ate)
+        ga4_paginas, ga4_diario = coleta_ga4(desde, ate)
     except Exception as e:
         log(f"ERRO GA4: {e}")
 
     bagy = coleta_bagy(desde, ate)
 
-    datas = sorted(set(meta_diario) | set(google_diario or {}))
+    datas = sorted(set(meta_diario) | set(google_diario or {}) | set(ga4_diario or {}))
     daily = [{
         "date": d,
         "meta": meta_diario.get(d),
         "google": (google_diario or {}).get(d),
+        "ga4": (ga4_diario or {}).get(d),
         "bagy": None if bagy is None else bagy.get(d),
     } for d in datas]
 
@@ -412,14 +498,15 @@ def monta_dados():
 
     return {
         "updated_at": datetime.now(TZ_SP).isoformat(timespec="minutes"),
-        "cliente": CLIENTE,
-        "responsavel": RESPONSAVEL,
+        "cliente": os.environ.get("CLIENTE_NOME", CLIENTE),
+        "responsavel": os.environ.get("RESPONSAVEL", RESPONSAVEL),
         "fontes": {
             "meta": {"estado": "ok"},
-            "google": {"estado": "ok" if google_diario else "pendente",
-                       "motivo": None if google_diario else "Conectar Google Ads no Windsor.ai (chave WINDSOR_API_KEY_GOOGLE_ADS)"},
-            "ga4": {"estado": "ok" if ga4_paginas else "pendente",
-                    "motivo": None if ga4_paginas else "Conectar GA4 no Windsor.ai (chave WINDSOR_API_KEY_GA4)"},
+            "google": {"estado": "ok" if google_diario is not None else "pendente",
+                       "motivo": None if google_diario is not None else
+                                 (motivo_google or "Google Ads não configurado no .env")},
+            "ga4": {"estado": "ok" if ga4_diario else "pendente",
+                    "motivo": None if ga4_diario else "GA4 sem dados no período"},
             "bagy": {"estado": "pendente",
                      "motivo": "Integração Bagy aguardando BAGY_API_TOKEN"},
         },
